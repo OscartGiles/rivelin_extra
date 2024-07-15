@@ -1,0 +1,128 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  CARGO_TERM_COLOR: always
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  determine_changes:
+    name: "Determine changes"
+    runs-on: ubuntu-latest
+    outputs:
+      # Flag that is raised when any code is changed
+      code: ${{ steps.changed.outputs.code_any_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: tj-actions/changed-files@v44
+        id: changed
+        with:
+          files_yaml: |
+            code:
+              - "**/*"
+              # - "!docs/**/*"
+              # - "!**/*.md"
+              # - "!bin/**"
+              # - "!assets/**"
+  cargo-fmt:
+    name: "cargo fmt"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Install Rustfmt"
+        run: rustup component add rustfmt
+
+      - name: "rustfmt"
+        run: cargo fmt --all --check
+
+  cargo-clippy:
+    needs: determine_changes
+    if: ${{ github.repository == 'OscartGiles/rivelin_extra' && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    runs-on: ubuntu-latest
+    name: "cargo clippy | ubuntu"
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Install Rust toolchain"
+        run: rustup component add clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: "Clippy"
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+
+  cargo-shear:
+    name: "cargo shear"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall --no-confirm cargo-shear
+      - run: cargo shear
+
+  cargo-test-linux:
+    needs: determine_changes
+    if: ${{ github.repository == 'OscartGiles/rivelin_extra' && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    runs-on:
+      labels: "ubuntu-latest"
+    name: "cargo test | ubuntu"
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Install Rust toolchain"
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: "Install cargo nextest"
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: "Cargo test"
+        run: |
+          cargo nextest run \
+            --all-features \
+            --workspace \
+            --status-level skip --failure-output immediate-final --no-fail-fast --final-status-level slow
+
+ 
+
+  cargo-test-macos:
+    needs: determine_changes
+    if: ${{ github.repository == 'OscartGiles/rivelin_extra' && (needs.determine_changes.outputs.code == 'true' || github.ref == 'refs/heads/main') }}
+    runs-on:
+      labels: "macos-14"
+    name: "cargo test | macos"
+    steps:
+      - uses: actions/checkout@v4
+      - name: "Install Rust toolchain"
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: "Install cargo nextest"
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: "Cargo test"
+        run: |
+          cargo nextest run \
+            --all-features \
+            --workspace \
+            --status-level skip --failure-output immediate-final --no-fail-fast --final-status-level slow
