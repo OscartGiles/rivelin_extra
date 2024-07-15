@@ -52,7 +52,10 @@ pub trait Actor
 where
     Self: 'static + Sized + Sync + Send,
 {
+    /// The type of message the actor can receive.
     type Message: Send + Sync;
+
+    /// The type of state the actor holds.
     type State: Send;
 
     /// Runs when the actor is started.
@@ -75,6 +78,12 @@ where
     }
 
     /// Handle a message sent to the actor.
+    ///
+    /// ```
+    /// async fn handle(&self, message: Self::Message, state: &mut Self::State) {
+    ///     println!("Hello {}", message);
+    /// }
+    /// ```
     fn handle(
         &self,
         message: Self::Message,
