@@ -34,8 +34,8 @@ jobs:
           files_yaml: |
             code:
               - "**/*"
+              - "!**/*.md"
               # - "!docs/**/*"
-              # - "!**/*.md"
               # - "!bin/**"
               # - "!assets/**"
   cargo-fmt:
