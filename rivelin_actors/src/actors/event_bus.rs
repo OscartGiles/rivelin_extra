@@ -312,6 +312,12 @@ impl<T: Topic> Consumer<T> {
 /// Use to create [Producer]s and [Consumer]s for topics.
 pub struct EventBusAddr(pub Addr<EventBus>);
 
+impl From<Addr<EventBus>> for EventBusAddr {
+    fn from(addr: Addr<EventBus>) -> Self {
+        Self(addr)
+    }
+}
+
 impl EventBusAddr {
     /// Create a new consumer for a topic.
     pub async fn consumer<T: Topic>(

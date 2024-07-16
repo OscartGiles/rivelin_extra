@@ -98,8 +98,8 @@ async fn event_bus_struct() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn event_bus_topic_values() -> anyhow::Result<()> {
-    let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
-    let addr = EventBusAddr(addr);
+    let (addr, _handle): (EventBusAddr, _) =
+        Actor::spawn(EventBus::new(100), EventSinkState::new());
 
     #[derive(Hash, Clone, Copy)]
     struct TopicWithValues {

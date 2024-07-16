@@ -11,6 +11,7 @@
 //! ```
 //! # use tokio_test;
 //! # use rivelin_actors::Actor;
+//! # use rivelin_actors::Addr;
 
 //! // Create a simple actor that prints a message
 //! struct HelloActor;
@@ -28,13 +29,14 @@
 //! # tokio_test::block_on(async {
 //! // Spawn an actor.
 //! // The address can be cheaply cloned.
-//! let (addr, handle) = Actor::spawn(HelloActor, ());
+//! let (addr, handle): (Addr<HelloActor>, _) = Actor::spawn(HelloActor, ());
 //!
-//! // Drop addr. Because no clones exist the actor can no longer receive messages and will gracefully shutdown.
+//! // Drop addr.
+//! // Because no clones exist the actor can no longer receive messages and will gracefully shutdown.
 //! drop(addr);
 //!
-//!  // Wait for the actor to finish processing messages
-//!  handle.await.unwrap();
+//! // Wait for the actor to finish processing messages
+//! handle.await.unwrap();
 //! # });
 use std::fmt::Display;
 
@@ -82,7 +84,10 @@ where
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Create an Actor instance.
-    fn spawn(actor: Self, state: Self::State) -> (Addr<Self>, tokio::task::JoinHandle<()>) {
+    fn spawn<K>(actor: Self, state: Self::State) -> (K, tokio::task::JoinHandle<()>)
+    where
+        K: From<Addr<Self>>,
+    {
         let (sender, receiver) = mpsc::channel::<Self::Message>(1000);
 
         let handle = tokio::spawn(async move {
@@ -91,7 +96,9 @@ where
             actor.run(ReceiverStream::new(receiver), state).await;
         });
 
-        (Addr::<Self>::new(sender), handle)
+        let addr = Addr::<Self>::new(sender);
+
+        (addr.into(), handle)
     }
 
     /// Spawn an actor as per [`Actor::spawn`] but providing an extra receiver to send messages to.

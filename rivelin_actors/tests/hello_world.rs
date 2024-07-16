@@ -30,6 +30,12 @@ impl Actor for HelloWorldActor {
 
 struct HelloWorldAddr(Addr<HelloWorldActor>);
 
+impl From<Addr<HelloWorldActor>> for HelloWorldAddr {
+    fn from(addr: Addr<HelloWorldActor>) -> Self {
+        Self(addr)
+    }
+}
+
 impl HelloWorldAddr {
     async fn message(&self, message: impl Into<String>) -> anyhow::Result<String> {
         let (tx, rx) = oneshot::channel();
@@ -47,8 +53,7 @@ impl HelloWorldAddr {
 
 #[tokio::test]
 async fn hello_world() -> anyhow::Result<()> {
-    let (addr, _handle) = Actor::spawn(HelloWorldActor, 0);
-    let addr = HelloWorldAddr(addr);
+    let (addr, _handle): (HelloWorldAddr, _) = Actor::spawn(HelloWorldActor, 0);
 
     let response = addr.message("World").await?;
     assert_eq!(response, "Hello World! I have received 1 messages");

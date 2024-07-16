@@ -127,6 +127,11 @@ impl Actor for BackgroundActor {
 
 pub struct BackgroundActorAddr(pub Addr<BackgroundActor>);
 
+impl From<Addr<BackgroundActor>> for BackgroundActorAddr {
+    fn from(addr: Addr<BackgroundActor>) -> Self {
+        Self(addr)
+    }
+}
 impl BackgroundActorAddr {
     pub async fn build(&self, build_id: BuildId) {
         self.0.send(Message::Build { build_id }).await.unwrap();
@@ -144,9 +149,8 @@ impl BackgroundActorAddr {
 
 #[tokio::test]
 async fn test_background_worker() {
-    let (addr, handle) = Actor::spawn(BackgroundActor, BackgroundActorState::new());
-
-    let addr = BackgroundActorAddr(addr);
+    let (addr, handle): (BackgroundActorAddr, _) =
+        Actor::spawn(BackgroundActor, BackgroundActorState::new());
 
     let first_build = BuildId::new();
     let second_build = BuildId::new();
