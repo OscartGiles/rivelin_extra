@@ -30,12 +30,9 @@
 //! // The address can be cheaply cloned.
 //! let (addr, handle) = Actor::spawn(HelloActor, ());
 //!
-//! // Shadow addr so it goes out of scope after sending a message.
-//! // Because no clones of addr exist the actor can no longer receive messages and will gracefully shutdown.
-//! {
-//!     let addr = addr;
-//!     addr.send("World".to_string()).await.unwrap();
-//!  }
+//! // Drop addr. Because no clones exist the actor can no longer receive messages and will gracefully shutdown.
+//! drop(addr);
+//!
 //!  // Wait for the actor to finish processing messages
 //!  handle.await.unwrap();
 //! # });
@@ -78,12 +75,6 @@ where
     }
 
     /// Handle a message sent to the actor.
-    ///
-    /// ```
-    /// async fn handle(&self, message: Self::Message, state: &mut Self::State) {
-    ///     println!("Hello {}", message);
-    /// }
-    /// ```
     fn handle(
         &self,
         message: Self::Message,
