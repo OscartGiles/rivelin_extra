@@ -117,15 +117,12 @@ impl Actor for BuildTaskManager {
 
                         }
                     }
-                },
-                else => {
-                    break;
                 }
             }
         }
     }
 
-    async fn on_stop(&self, state: &mut Self::State) {
+    async fn on_stop(self, state: &mut Self::State) {
         println!("Waiting for all running tasks to complete.");
         while !state.tasks.is_empty() {
             state.tasks.join_next().await;

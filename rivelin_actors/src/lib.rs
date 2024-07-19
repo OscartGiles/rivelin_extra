@@ -68,7 +68,7 @@ where
     }
 
     /// Runs when the actor is gracefully stopped.
-    fn on_stop(&self, _state: &mut Self::State) -> impl std::future::Future<Output = ()> + Send {
+    fn on_stop(self, _state: &mut Self::State) -> impl std::future::Future<Output = ()> + Send {
         async {}
     }
 
@@ -95,9 +95,6 @@ where
                                 break
                             },
                         };
-                    },
-                    else => {
-                        break;
                     }
                 }
             }
