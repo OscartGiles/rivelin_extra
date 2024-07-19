@@ -49,10 +49,10 @@ mod actors;
 pub use actors::event_bus;
 pub trait Actor
 where
-    Self: 'static + Sized + Sync + Send,
+    Self: 'static + Sized + Send,
 {
     /// The type of message the actor can receive.
-    type Message: Send + Sync;
+    type Message: Send;
 
     /// The type of state the actor holds.
     type State: Send;
