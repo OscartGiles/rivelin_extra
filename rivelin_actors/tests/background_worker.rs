@@ -1,5 +1,4 @@
 use rivelin_actors::{Actor, Addr};
-use uuid::Uuid;
 
 use std::collections::HashMap;
 
@@ -13,23 +12,23 @@ use tokio_stream::StreamExt;
 #[derive(Debug)]
 pub enum Message {
     Build {
-        build_id: Uuid,
+        resp_chan: oneshot::Sender<tokio::task::Id>,
     },
     Cancel {
-        build_id: Uuid,
-        msg: oneshot::Sender<bool>,
+        build_id: tokio::task::Id,
+        resp_chan: oneshot::Sender<bool>,
     },
 }
 
 pub struct BackgroundActorState {
-    build_tracker: HashMap<Uuid, AbortHandle>,
-    tasks: JoinSet<Uuid>,
+    abort_handles: HashMap<tokio::task::Id, AbortHandle>,
+    tasks: JoinSet<()>,
 }
 
 impl BackgroundActorState {
     pub fn new() -> Self {
         Self {
-            build_tracker: HashMap::new(),
+            abort_handles: HashMap::new(),
             tasks: JoinSet::new(),
         }
     }
@@ -49,18 +48,24 @@ impl Actor for BackgroundActor {
 
     async fn handle(&self, message: Self::Message, state: &mut Self::State) {
         match message {
-            Message::Build { build_id } => {
-                println!("Building: {}", build_id);
-
+            Message::Build { resp_chan } => {
                 let handle = state.tasks.spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                    build_id
                 });
-                state.build_tracker.insert(build_id, handle);
+
+                let task_id = handle.id();
+                println!("Building: {}", task_id);
+                // Store the handle in the build_tracker
+                state.abort_handles.insert(task_id, handle);
+                // Respond with the task id to allow cancellation
+                resp_chan.send(task_id).unwrap();
             }
-            Message::Cancel { build_id, msg } => {
+            Message::Cancel {
+                build_id,
+                resp_chan: msg,
+            } => {
                 println!("Cancelling: build: {}", build_id);
-                if let Some(handle) = state.build_tracker.remove(&build_id) {
+                if let Some(handle) = state.abort_handles.remove(&build_id) {
                     handle.abort();
                     msg.send(true).unwrap();
                 } else {
@@ -78,19 +83,23 @@ impl Actor for BackgroundActor {
     ) {
         loop {
             tokio::select! {
-                res = state.tasks.join_next(), if !state.tasks.is_empty() => {
-                    if let Some(Ok(build_id)) = res {
-                        if let Some(_handle) = state.build_tracker.remove(&build_id) {
-                            println!("Task completed: {}", build_id);
+                res = state.tasks.join_next_with_id(), if !state.tasks.is_empty() => {
+                    if let Some(Ok((build_id, _))) = res {
+                        if let Some(_handle) = state.abort_handles.remove(&build_id) {
+                            println!("Task completed: {:?}", build_id);
                         } else {
-                            eprintln!("Task not found for cancellation: {}", build_id);
+                            eprintln!("Task not found for cancellation: {:?}", build_id);
                         }
                     }
                     else if let Some(Err(e)) = res {
+                        // Get the build_id from the error and remove it from the build_tracker
+                        let build_id = e.id();
+                        state.abort_handles.remove(&build_id);
                         if e.is_cancelled() {
                             eprintln!("A task was cancelled.");
                         } else {
-                        eprintln!("Task failed: {:?}", e);
+                            eprintln!("Task failed. But the actor is still alive, honest");
+
                         }
                     }
                 }
@@ -111,13 +120,20 @@ impl From<Addr<BackgroundActor>> for BackgroundActorAddr {
     }
 }
 impl BackgroundActorAddr {
-    pub async fn build(&self, build_id: Uuid) {
-        self.0.send(Message::Build { build_id }).await.unwrap();
+    pub async fn build(&self) -> tokio::task::Id {
+        let (tx, rx) = oneshot::channel();
+
+        self.0.send(Message::Build { resp_chan: tx }).await.unwrap();
+
+        rx.await.unwrap()
     }
-    pub async fn cancel(&self, build_id: Uuid) -> bool {
+    pub async fn cancel(&self, build_id: tokio::task::Id) -> bool {
         let (tx, rx) = oneshot::channel();
         self.0
-            .send(Message::Cancel { build_id, msg: tx })
+            .send(Message::Cancel {
+                build_id,
+                resp_chan: tx,
+            })
             .await
             .unwrap();
 
@@ -130,13 +146,11 @@ async fn test_background_worker() {
     let (addr, handle): (BackgroundActorAddr, _) =
         Actor::spawn(BackgroundActor, BackgroundActorState::new());
 
-    let first_build = Uuid::new_v4();
-    let second_build = Uuid::new_v4();
+    let first_build_id = addr.build().await;
+    let _second_build_id = addr.build().await;
 
-    addr.build(first_build).await;
-    addr.build(second_build).await;
-
-    let cancel_success = addr.cancel(first_build).await;
+    println!("Cancelling: {:?}", first_build_id);
+    let cancel_success = addr.cancel(first_build_id).await;
     assert!(cancel_success);
 
     drop(addr); // Drop addr so that the actor can shut down. It will process any remaining tasks before shutting down.
