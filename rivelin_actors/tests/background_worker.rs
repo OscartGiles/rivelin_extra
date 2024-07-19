@@ -1,6 +1,7 @@
 use rivelin_actors::{Actor, Addr};
+use uuid::Uuid;
 
-use std::{collections::HashMap, fmt::Display};
+use std::collections::HashMap;
 
 use futures::Stream;
 use tokio::{
@@ -9,41 +10,20 @@ use tokio::{
 };
 use tokio_stream::StreamExt;
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
-pub struct BuildId(uuid::Uuid);
-
-impl BuildId {
-    pub fn new() -> Self {
-        Self(uuid::Uuid::new_v4())
-    }
-}
-
-impl Default for BuildId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Display for BuildId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
 #[derive(Debug)]
 pub enum Message {
     Build {
-        build_id: BuildId,
+        build_id: Uuid,
     },
     Cancel {
-        build_id: BuildId,
+        build_id: Uuid,
         msg: oneshot::Sender<bool>,
     },
 }
 
 pub struct BackgroundActorState {
-    build_tracker: HashMap<BuildId, AbortHandle>,
-    tasks: JoinSet<BuildId>,
+    build_tracker: HashMap<Uuid, AbortHandle>,
+    tasks: JoinSet<Uuid>,
 }
 
 impl BackgroundActorState {
@@ -71,13 +51,12 @@ impl Actor for BackgroundActor {
         match message {
             Message::Build { build_id } => {
                 println!("Building: {}", build_id);
-                let build_id_idx = build_id.clone();
+
                 let handle = state.tasks.spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     build_id
                 });
-
-                state.build_tracker.insert(build_id_idx, handle);
+                state.build_tracker.insert(build_id, handle);
             }
             Message::Cancel { build_id, msg } => {
                 println!("Cancelling: build: {}", build_id);
@@ -101,7 +80,6 @@ impl Actor for BackgroundActor {
             tokio::select! {
                 res = state.tasks.join_next(), if !state.tasks.is_empty() => {
                     if let Some(Ok(build_id)) = res {
-                        let build_id: BuildId = build_id;
                         if let Some(_handle) = state.build_tracker.remove(&build_id) {
                             println!("Task completed: {}", build_id);
                         } else {
@@ -133,10 +111,10 @@ impl From<Addr<BackgroundActor>> for BackgroundActorAddr {
     }
 }
 impl BackgroundActorAddr {
-    pub async fn build(&self, build_id: BuildId) {
+    pub async fn build(&self, build_id: Uuid) {
         self.0.send(Message::Build { build_id }).await.unwrap();
     }
-    pub async fn cancel(&self, build_id: BuildId) -> bool {
+    pub async fn cancel(&self, build_id: Uuid) -> bool {
         let (tx, rx) = oneshot::channel();
         self.0
             .send(Message::Cancel { build_id, msg: tx })
@@ -152,10 +130,10 @@ async fn test_background_worker() {
     let (addr, handle): (BackgroundActorAddr, _) =
         Actor::spawn(BackgroundActor, BackgroundActorState::new());
 
-    let first_build = BuildId::new();
-    let second_build = BuildId::new();
+    let first_build = Uuid::new_v4();
+    let second_build = Uuid::new_v4();
 
-    addr.build(first_build.clone()).await;
+    addr.build(first_build).await;
     addr.build(second_build).await;
 
     let cancel_success = addr.cancel(first_build).await;
