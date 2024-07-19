@@ -20,12 +20,12 @@ pub enum Message {
     },
 }
 
-pub struct BackgroundActorState {
+pub struct TaskManagerState {
     abort_handles: HashMap<tokio::task::Id, AbortHandle>,
     tasks: JoinSet<()>,
 }
 
-impl BackgroundActorState {
+impl TaskManagerState {
     pub fn new() -> Self {
         Self {
             abort_handles: HashMap::new(),
@@ -34,17 +34,17 @@ impl BackgroundActorState {
     }
 }
 
-impl Default for BackgroundActorState {
+impl Default for TaskManagerState {
     fn default() -> Self {
         Self::new()
     }
 }
 
-pub struct BackgroundActor;
+pub struct BuildTaskManager;
 
-impl Actor for BackgroundActor {
+impl Actor for BuildTaskManager {
     type Message = Message;
-    type State = BackgroundActorState;
+    type State = TaskManagerState;
 
     async fn handle(&self, message: Self::Message, state: &mut Self::State) {
         match message {
@@ -112,10 +112,10 @@ impl Actor for BackgroundActor {
     }
 }
 
-pub struct BackgroundActorAddr(pub Addr<BackgroundActor>);
+pub struct BackgroundActorAddr(pub Addr<BuildTaskManager>);
 
-impl From<Addr<BackgroundActor>> for BackgroundActorAddr {
-    fn from(addr: Addr<BackgroundActor>) -> Self {
+impl From<Addr<BuildTaskManager>> for BackgroundActorAddr {
+    fn from(addr: Addr<BuildTaskManager>) -> Self {
         Self(addr)
     }
 }
@@ -144,7 +144,7 @@ impl BackgroundActorAddr {
 #[tokio::test]
 async fn test_background_worker() {
     let (addr, handle): (BackgroundActorAddr, _) =
-        Actor::spawn(BackgroundActor, BackgroundActorState::new());
+        Actor::spawn(BuildTaskManager, TaskManagerState::new());
 
     let first_build_id = addr.build().await;
     let _second_build_id = addr.build().await;
