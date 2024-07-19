@@ -38,15 +38,20 @@
 //! // Wait for the actor to finish processing messages
 //! handle.await.unwrap();
 //! # });
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-use futures::Stream;
+use futures::{Future, Stream};
 use thiserror::Error;
 use tokio::sync::mpsc::{self};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
 
 mod actors;
 pub use actors::event_bus;
+use tokio_util::sync::CancellationToken;
 pub trait Actor
 where
     Self: 'static + Sized + Send,
@@ -62,16 +67,39 @@ where
         async {}
     }
 
+    /// Runs when the actor is gracefully stopped.
+    fn on_stop(&self, _state: &mut Self::State) -> impl std::future::Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Runs the actor. The default implementation simple iterates over a stream of messages and calls [`Actor::handle`] for each message.
     /// Override this method if you need to handle messages in a different way.
     fn run(
         self,
         mut message_stream: impl Stream<Item = Self::Message> + Send + 'static + std::marker::Unpin,
         mut state: Self::State,
+        cancellation_token: CancellationToken,
     ) -> impl std::future::Future<Output = ()> + Send {
         async move {
-            while let Some(message) = message_stream.next().await {
-                self.handle(message, &mut state).await;
+            loop {
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => {
+                        self.on_stop(&mut state).await;
+                        break;
+                    },
+                    message = message_stream.next() => {
+                        match message {
+                            Some(message) => self.handle(message, &mut state).await,
+                            None => {
+                                self.on_stop(&mut state).await;
+                                break
+                            },
+                        };
+                    },
+                    else => {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -84,44 +112,56 @@ where
     ) -> impl std::future::Future<Output = ()> + Send;
 
     /// Create an Actor instance.
-    fn spawn<K>(actor: Self, state: Self::State) -> (K, tokio::task::JoinHandle<()>)
+    fn spawn<K>(actor: Self, state: Self::State) -> (K, ActorHandle)
     where
         K: From<Addr<Self>>,
     {
         let (sender, receiver) = mpsc::channel::<Self::Message>(1000);
 
+        let cancellation_token = CancellationToken::new();
+        let actors_cancel_token = cancellation_token.clone();
+
         let handle = tokio::spawn(async move {
             let mut state = state;
             actor.on_start(&mut state).await;
-            actor.run(ReceiverStream::new(receiver), state).await;
+            actor
+                .run(ReceiverStream::new(receiver), state, actors_cancel_token)
+                .await;
         });
 
         let addr = Addr::<Self>::new(sender);
 
-        (addr.into(), handle)
+        (
+            addr.into(),
+            ActorHandle {
+                task_handle: handle,
+                cancellation_token,
+            },
+        )
     }
+}
 
-    /// Spawn an actor as per [`Actor::spawn`] but providing an extra receiver to send messages to.
-    /// Messages from both the receiver and the addr be sent to the actor.
-    /// Prefer [`Actor::spawn`] which provides an [Addr] to send messages to the actor.
-    fn spawn_with_recv(
-        actor: Self,
-        state: Self::State,
-        extra_receiver: mpsc::Receiver<impl Into<Self::Message> + Send + 'static>,
-    ) -> (Addr<Self>, tokio::task::JoinHandle<()>) {
-        let (sender, receiver) = mpsc::channel::<Self::Message>(1000);
-        let addr_receiver = ReceiverStream::new(receiver);
+pub struct ActorHandle {
+    task_handle: tokio::task::JoinHandle<()>,
+    cancellation_token: CancellationToken,
+}
 
-        let custom_receiver = ReceiverStream::new(extra_receiver).map(|msg| msg.into());
-        let merged_streams = addr_receiver.merge(custom_receiver);
+impl ActorHandle {
+    pub fn abort(&self) {
+        self.task_handle.abort();
+    }
+    pub async fn graceful_shutdown(self) -> Result<(), tokio::task::JoinError> {
+        self.cancellation_token.cancel();
+        self.task_handle.await
+    }
+}
 
-        let handle = tokio::spawn(async move {
-            let mut state = state;
-            actor.on_start(&mut state).await;
-            actor.run(merged_streams, state).await;
-        });
+impl Future for ActorHandle {
+    type Output = Result<(), tokio::task::JoinError>;
 
-        (Addr::<Self>::new(sender), handle)
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.task_handle) };
+        inner.poll(cx)
     }
 }
 

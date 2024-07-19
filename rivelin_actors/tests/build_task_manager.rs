@@ -1,4 +1,5 @@
 use rivelin_actors::{Actor, Addr};
+use tokio_util::sync::CancellationToken;
 
 use std::collections::HashMap;
 
@@ -50,12 +51,12 @@ impl Actor for BuildTaskManager {
         match message {
             Message::Build { resp_chan } => {
                 let handle = state.tasks.spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 });
 
                 let task_id = handle.id();
                 println!("Building: {}", task_id);
-                // Store the handle in the build_tracker
+                // Store the abort handle in the build_tracker
                 state.abort_handles.insert(task_id, handle);
                 // Respond with the task id to allow cancellation
                 resp_chan.send(task_id).unwrap();
@@ -80,9 +81,23 @@ impl Actor for BuildTaskManager {
         self,
         mut message_stream: impl Stream<Item = Self::Message> + Send + 'static + std::marker::Unpin,
         mut state: Self::State,
+        cancellation_token: CancellationToken,
     ) {
         loop {
             tokio::select! {
+                _ = cancellation_token.cancelled() => {
+                    self.on_stop(&mut state).await;
+                    break;
+                },
+                message = message_stream.next() => {
+                    match message {
+                        Some(message) => self.handle(message, &mut state).await,
+                        None => {
+                            self.on_stop(&mut state).await;
+                            break
+                        },
+                    };
+                },
                 res = state.tasks.join_next_with_id(), if !state.tasks.is_empty() => {
                     if let Some(Ok((build_id, _))) = res {
                         if let Some(_handle) = state.abort_handles.remove(&build_id) {
@@ -102,12 +117,18 @@ impl Actor for BuildTaskManager {
 
                         }
                     }
-                }
-                Some(message) = message_stream.next() => {
-                    self.handle(message, &mut state).await;
                 },
-                else => break,
+                else => {
+                    break;
+                }
             }
+        }
+    }
+
+    async fn on_stop(&self, state: &mut Self::State) {
+        println!("Waiting for all running tasks to complete.");
+        while !state.tasks.is_empty() {
+            state.tasks.join_next().await;
         }
     }
 }
@@ -122,9 +143,7 @@ impl From<Addr<BuildTaskManager>> for BackgroundActorAddr {
 impl BackgroundActorAddr {
     pub async fn build(&self) -> tokio::task::Id {
         let (tx, rx) = oneshot::channel();
-
         self.0.send(Message::Build { resp_chan: tx }).await.unwrap();
-
         rx.await.unwrap()
     }
     pub async fn cancel(&self, build_id: tokio::task::Id) -> bool {
@@ -155,4 +174,17 @@ async fn test_background_worker() {
 
     drop(addr); // Drop addr so that the actor can shut down. It will process any remaining tasks before shutting down.
     handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn test_background_worker_shutdown() {
+    let (addr, handle): (BackgroundActorAddr, _) =
+        Actor::spawn(BuildTaskManager, TaskManagerState::new());
+
+    addr.build().await;
+    addr.build().await;
+    addr.build().await;
+    addr.build().await;
+
+    handle.graceful_shutdown().await.unwrap();
 }

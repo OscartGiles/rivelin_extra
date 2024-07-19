@@ -8,6 +8,7 @@ futures = "0.3.30"
 thiserror = "1.0.61"
 tokio = { version = "1.38.0", features = ["rt"] }
 tokio-stream = { version = "0.1.15", features = ["sync"] }
+tokio-util = "0.7.11"
 
 [dev-dependencies]
 anyhow = "1.0.86"
