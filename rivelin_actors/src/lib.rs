@@ -44,7 +44,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures::{Future, Stream};
+use futures::{Future, FutureExt, Stream};
 use thiserror::Error;
 use tokio::sync::mpsc::{self};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
@@ -156,9 +156,8 @@ impl ActorHandle {
 impl Future for ActorHandle {
     type Output = Result<(), tokio::task::JoinError>;
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let inner = unsafe { self.map_unchecked_mut(|s| &mut s.task_handle) };
-        inner.poll(cx)
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        self.task_handle.poll_unpin(cx)
     }
 }
 
