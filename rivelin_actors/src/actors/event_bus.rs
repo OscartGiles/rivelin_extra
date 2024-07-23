@@ -150,54 +150,134 @@ use std::{
 };
 
 use crate::{Actor, Addr, AddrError};
-use futures::{Stream, TryStreamExt};
+use futures::{Stream, StreamExt};
 use std::fmt::Debug;
 use tokio::sync::{
-    broadcast::{self, error::RecvError, Receiver},
+    mpsc::{self, Receiver},
     oneshot,
 };
-use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
+use tokio_stream::wrappers::ReceiverStream;
 
-#[derive(Debug, Clone)]
-pub struct Event {
-    payload: Arc<dyn Any + Send + Sync>,
-    topic_id: TopicId,
+/// A [Topic] is a type which defines a topic that [Producer]s can send messages to and [Consumer]s can receive messages from.
+pub trait Topic: TopicAny {
+    /// The type of message that can be sent and received for the topic.
+    type MessageType: Send + Sync;
 }
 
-#[derive(Debug, Clone)]
-pub struct RecoveredEvent<T: Topic> {
-    payload: Arc<dyn Any + Send + Sync>,
-    phantom: PhantomData<T>,
+/// A trait for converting a type to a [TopicId] and casing to Any.
+pub trait TopicAny: Any + Send + Sync {
+    fn topic_id(&self) -> TopicId {
+        let mut state = DefaultHasher::new();
+        let type_id = TypeId::of::<Self>();
+        type_id.hash(&mut state);
+        let topic_hash = state.finish();
+        TopicId { hash: topic_hash }
+    }
+
+    fn id() -> TopicId
+    where
+        Self: Sized,
+    {
+        let mut state = DefaultHasher::new();
+        let type_id = TypeId::of::<Self>();
+        type_id.hash(&mut state);
+        let topic_hash = state.finish();
+        TopicId { hash: topic_hash }
+    }
+
+    fn to_any(self: Arc<Self>) -> Arc<dyn Any + Send>;
 }
 
-impl<T: Topic> AsRef<T::MessageType> for RecoveredEvent<T> {
-    fn as_ref(&self) -> &T::MessageType {
-        match self.payload.downcast_ref::<T::MessageType>() {
-            Some(value) => value,
-            None => panic!(
-                "Could not downcast. This should never happen and is a bug. Please report it."
-            ),
-        }
+impl Debug for dyn TopicAny {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "TopicAny")
     }
 }
 
-#[derive(Debug)]
+impl<T: Any + Send + Sync> TopicAny for T {
+    fn to_any(self: Arc<Self>) -> Arc<dyn Any + Send> {
+        self
+    }
+}
+
+/// UniqueID for a topic type.
+#[derive(Hash, Debug, PartialEq, Eq, Clone)]
+pub struct TopicId {
+    hash: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Event {
+    payload: Arc<dyn Any + Send + Sync>,
+    topic: Arc<dyn TopicAny>,
+}
+
 pub enum EventMessage {
     Event(Event),
     Subscribe {
         topic_id: TopicId,
-        sender: oneshot::Sender<broadcast::Receiver<Event>>,
+        sender: oneshot::Sender<mpsc::Receiver<Event>>,
+        filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
     },
 }
 
-pub struct EventSinkState {
-    listeners: HashMap<TopicId, broadcast::Sender<Event>>,
+impl Debug for EventMessage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Event(arg0) => f.debug_tuple("Event").field(arg0).finish(),
+            Self::Subscribe {
+                topic_id,
+                sender,
+                filter: _,
+            } => f
+                .debug_struct("Subscribe")
+                .field("topic_id", topic_id)
+                .field("sender", sender)
+                .finish(),
+        }
+    }
 }
+
+struct EventSender {
+    sender: mpsc::Sender<Event>,
+    filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
+}
+
+impl EventSender {
+    fn new(
+        sender: mpsc::Sender<Event>,
+        filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
+    ) -> Self {
+        Self { sender, filter }
+    }
+}
+
+pub struct EventSinkState {
+    listeners: HashMap<TopicId, Vec<EventSender>>,
+}
+
 impl EventSinkState {
     pub fn new() -> Self {
         Self {
             listeners: HashMap::new(),
         }
+    }
+
+    fn get_topic_listeners(
+        &self,
+        topic_any: Arc<dyn TopicAny>,
+    ) -> impl Iterator<Item = &EventSender> {
+        // Get the topic id of dyn TopicAny, not Arc<dyn TopicAny>. So dereference before calling.
+        let id = (*topic_any).topic_id();
+        let topic_listeners = self.listeners.get(&id).unwrap();
+
+        topic_listeners.iter().filter(move |s| {
+            if let Some(filter) = &s.filter {
+                (filter)(&topic_any)
+            } else {
+                true
+            }
+        })
     }
 }
 impl Default for EventSinkState {
@@ -234,34 +314,45 @@ impl Actor for EventBus {
     async fn handle(&self, message: Self::Message, state: &mut Self::State) {
         match message {
             EventMessage::Event(event) => {
-                if let Some(sender) = state.listeners.get(&event.topic_id) {
-                    let _ = sender.send(event);
-                } else {
-                    println!("No listeners for topic: {:?}", &event.topic_id);
+                let listeners = state.get_topic_listeners(event.topic.clone());
+
+                for l in listeners.into_iter() {
+                    l.sender.send(event.clone()).await.unwrap();
                 }
             }
             EventMessage::Subscribe {
-                topic_id: topic_type,
+                topic_id,
                 sender,
+                filter,
             } => {
-                let project_entry = state.listeners.entry(topic_type);
+                println!("Subscribing to topic: {:?}", topic_id);
+                let topic_listerners = state.listeners.entry(topic_id).or_insert(vec![]);
 
-                let receiver = match project_entry {
-                    std::collections::hash_map::Entry::Occupied(inner) => {
-                        let recv = inner.get().subscribe();
-                        recv
-                    }
-                    std::collections::hash_map::Entry::Vacant(_) => {
-                        let (send, recv) = broadcast::channel(self.channel_capacity);
-                        let _ = project_entry.or_insert(send);
-                        recv
-                    }
-                };
+                let (send, receiver) = mpsc::channel(self.channel_capacity);
+
+                topic_listerners.push(EventSender::new(send, filter));
 
                 if let Err(e) = sender.send(receiver) {
                     println!("Failed to send receiver: {:?}", e);
                 }
             }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveredEvent<T: Topic> {
+    payload: Arc<dyn Any + Send + Sync>,
+    phantom: PhantomData<T>,
+}
+
+impl<T: Topic> AsRef<T::MessageType> for RecoveredEvent<T> {
+    fn as_ref(&self) -> &T::MessageType {
+        match self.payload.downcast_ref::<T::MessageType>() {
+            Some(value) => value,
+            None => panic!(
+                "Could not downcast. This should never happen and is a bug. Please report it."
+            ),
         }
     }
 }
@@ -274,19 +365,18 @@ pub struct Consumer<T: Topic> {
 
 impl<T: Topic> Consumer<T> {
     /// Receive a message from the topic.
-    pub async fn recv(&mut self) -> Result<RecoveredEvent<T>, RecvError> {
-        let value = self.receiver.recv().await?;
-        Ok(RecoveredEvent {
-            payload: value.payload,
+    pub async fn recv(&mut self) -> Option<RecoveredEvent<T>> {
+        let value = self.receiver.recv().await.map(|e| RecoveredEvent {
+            payload: e.payload,
             phantom: PhantomData,
-        })
+        });
+
+        value
     }
 
     /// Convert the consumer to a [Stream].
-    pub fn to_stream(
-        self,
-    ) -> impl Stream<Item = Result<RecoveredEvent<T>, BroadcastStreamRecvError>> {
-        BroadcastStream::new(self.receiver).map_ok(|elem| RecoveredEvent {
+    pub fn to_stream(self) -> impl Stream<Item = RecoveredEvent<T>> {
+        ReceiverStream::new(self.receiver).map(|elem| RecoveredEvent {
             payload: elem.payload,
             phantom: PhantomData,
         })
@@ -295,14 +385,14 @@ impl<T: Topic> Consumer<T> {
 
 // /// A Consumer for a topic.
 // pub struct ConsumerStream<T: Topic> {
-//     stream: BroadcastStream<Event>,
+//     stream: ReceiverStream<Event>,
 //     phantom: PhantomData<T>,
 // }
 
 // impl<T: Topic> From<Consumer<T>> for ConsumerStream<T> {
 //     fn from(consumer: Consumer<T>) -> Self {
 //         Self {
-//             stream: BroadcastStream::new(consumer.receiver),
+//             stream: ReceiverStream::new(consumer.receiver),
 //             phantom: PhantomData,
 //         }
 //     }
@@ -320,16 +410,34 @@ impl From<Addr<EventBus>> for EventBusAddr {
 
 impl EventBusAddr {
     /// Create a new consumer for a topic.
-    pub async fn consumer<T: Topic>(
-        &self,
-        topic: T,
-    ) -> Result<Consumer<T>, AddrError<EventMessage>> {
+    pub async fn consumer<T: Topic, F>(&self, f: F) -> Result<Consumer<T>, AddrError<EventMessage>>
+    where
+        F: Fn(&T) -> bool + Send + Sync + 'static,
+    {
         let (tx, rx) = oneshot::channel();
+
+        let topic_id = T::id();
+        // Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>
+
+        let f = move |item: &Arc<dyn TopicAny>| {
+            let ptr = <Arc<dyn TopicAny> as Clone>::clone(&item).to_any();
+
+            // Downcast
+            let value = match ptr.downcast_ref::<T>() {
+                Some(value) => value,
+                None => panic!(
+                    "Could not downcast. This should never happen and is a bug. Please report it."
+                ),
+            };
+
+            f(value)
+        };
 
         self.0
             .send(EventMessage::Subscribe {
-                topic_id: topic.topic_id(),
+                topic_id,
                 sender: tx,
+                filter: Some(Box::new(f)),
             })
             .await?;
 
@@ -344,60 +452,35 @@ impl EventBusAddr {
     where
         T: Topic,
     {
+        // let a = Arc::new(topic);
+        // let b = a as Arc<dyn TopicAny>;
+
+        println!("Producer for topic: {:?}", T::id());
         Producer {
             addr: self.0.clone(),
-            topic_id: topic.topic_id(),
-            phantom: PhantomData,
+            topic: Arc::new(topic),
         }
     }
 }
 
 /// A Producer for a topic.
-pub struct Producer<T> {
+pub struct Producer<T: Topic> {
     addr: Addr<EventBus>,
-    topic_id: TopicId,
-    phantom: PhantomData<T>,
+    topic: Arc<T>,
+    // phantom: PhantomData<T>,
 }
 
 impl<T: Topic> Producer<T> {
     /// Send a message to the topic.
     pub async fn send(&self, message: T::MessageType) -> Result<(), AddrError<EventMessage>> {
+        let t = self.topic.clone();
+
         let message = Event {
             payload: Arc::new(message),
-            topic_id: self.topic_id.clone(),
+            topic: t,
         };
         self.addr.send(EventMessage::Event(message)).await?;
 
         Ok(())
-    }
-}
-
-#[derive(Hash, Debug, PartialEq, Eq, Clone)]
-pub struct TopicId {
-    hash: u64,
-}
-
-/// A [Topic] is a type which defines a topic that [Producer]s can send messages to and [Consumer]s can receive messages from.
-/// Implementations of [Topic] must:
-///  1. Implement [Hash]. Required to uniquely identify the topic.
-///  2. Implement [Sized]. Required to be able to create a [TopicId] for the topic.
-///  3. Be `'static`` (i.e. Cannot contain non-static references).
-pub trait Topic: std::hash::Hash
-where
-    Self: 'static + Sized,
-{
-    /// The type of message that can be sent and received for the topic.
-    type MessageType: Send + Sync + 'static;
-
-    /// The topic_id is a unique identifier for a topic.
-    /// It is based on both the type of the topic and the hash of the implementing type.
-    fn topic_id(self) -> TopicId {
-        let mut state = DefaultHasher::new();
-        let type_id = TypeId::of::<Self>();
-        type_id.hash(&mut state);
-        self.hash(&mut state);
-
-        let topic_hash = state.finish();
-        TopicId { hash: topic_hash }
     }
 }

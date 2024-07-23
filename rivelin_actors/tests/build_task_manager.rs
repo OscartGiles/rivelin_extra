@@ -51,7 +51,7 @@ impl Actor for BuildTaskManager {
         match message {
             Message::Build { resp_chan } => {
                 let handle = state.tasks.spawn(async move {
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 });
 
                 let task_id = handle.id();
