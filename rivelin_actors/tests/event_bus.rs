@@ -1,9 +1,7 @@
-use std::any::Any;
 use std::hash::Hash;
-use std::sync::Arc;
 
 use futures_util::StreamExt;
-use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, TopicAny};
+use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Filter, Topic};
 use rivelin_actors::Actor;
 
 #[tokio::test]
@@ -18,12 +16,10 @@ async fn event_bus_string() -> anyhow::Result<()> {
         type MessageType = String;
     }
 
-    let t1 = HelloTopic::id();
-    let t2 = HelloTopic.topic_id();
+    let mut consumer = addr
+        .consumer::<HelloTopic, _>(Filter::all_subtopics)
+        .await?;
 
-    println!("t1 = {:?}, t2 = {:?}", t1, t2);
-
-    let mut consumer = addr.consumer::<HelloTopic, _>(|_| true).await?;
     let producer = addr.producer(HelloTopic);
     producer.send("Hello from topic a".to_string()).await?;
 
@@ -47,7 +43,7 @@ async fn event_bus_consumer_stream() -> anyhow::Result<()> {
     }
 
     let mut consumer = addr
-        .consumer::<HelloTopic, _>(|e| true)
+        .consumer::<HelloTopic, _>(Filter::all_subtopics)
         .await?
         .to_stream()
         .enumerate();
@@ -78,7 +74,7 @@ async fn event_bus_struct() -> anyhow::Result<()> {
     let addr = EventBusAddr(addr);
 
     #[derive(PartialEq, Eq, Debug, Clone)]
-    struct ComplexMessage {
+    struct StructMessage {
         name: String,
         age: u8,
     }
@@ -87,13 +83,16 @@ async fn event_bus_struct() -> anyhow::Result<()> {
     struct ComplexTopic;
 
     impl Topic for ComplexTopic {
-        type MessageType = ComplexMessage;
+        type MessageType = StructMessage;
     }
 
-    let mut consumer = addr.consumer::<ComplexTopic, _>(|e| true).await?;
+    let mut consumer = addr
+        .consumer::<ComplexTopic, _>(Filter::all_subtopics)
+        .await?;
+
     let producer = addr.producer(ComplexTopic);
 
-    let message = ComplexMessage {
+    let message = StructMessage {
         name: "Oscar".to_string(),
         age: 33,
     };
@@ -125,10 +124,14 @@ async fn event_bus_topic_values() -> anyhow::Result<()> {
     let topic_a = TopicWithValues { a: 1, b: 1 };
     let topic_b = TopicWithValues { a: 1, b: 2 };
 
-    let mut consumer_a = addr.consumer::<TopicWithValues, _>(|_| true).await?;
+    let mut consumer_a = addr
+        .consumer::<TopicWithValues, _>(Filter::all_subtopics)
+        .await?;
     let producer_a = addr.producer(topic_a);
 
-    let mut consumer_b = addr.consumer::<TopicWithValues, _>(|_| true).await?;
+    let mut consumer_b = addr
+        .consumer::<TopicWithValues, _>(Filter::all_subtopics)
+        .await?;
     let producer_b = addr.producer(topic_b);
 
     producer_a.send("Message A".into()).await?;
@@ -155,6 +158,48 @@ async fn event_bus_subtopics() -> anyhow::Result<()> {
     let addr = EventBusAddr(addr);
 
     #[derive(Hash, Clone, Copy)]
+    struct SubTopic {
+        a: u32,
+        b: u64,
+    }
+
+    impl Topic for SubTopic {
+        type MessageType = u32;
+    }
+
+    // These are two different topics
+    let subtopic_a = SubTopic { a: 1, b: 1 };
+    let subtopic_b = SubTopic { a: 1, b: 2 };
+    let subtopic_c = SubTopic { a: 1, b: 3 };
+
+    let producer_a = addr.producer(subtopic_a);
+    let producer_b = addr.producer(subtopic_b);
+    let producer_c = addr.producer(subtopic_c);
+
+    // We have to give a type hint somewhere here (one of two ways)
+    let mut consumer = addr.consumer(|t: &SubTopic| t.b > 2).await?;
+
+    producer_a.send(1).await?;
+    producer_b.send(2).await?;
+    producer_c.send(3).await?;
+
+    let res = consumer.recv().await.unwrap();
+
+    // Should only receive the last value, even though sent last
+    assert_eq!(*res.as_ref(), 3);
+
+    // No more values should be available
+    assert!(consumer.try_recv().is_err());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_bus_multiple_subtopics() -> anyhow::Result<()> {
+    let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
+    let addr = EventBusAddr(addr);
+
+    #[derive(Hash, Clone, Copy)]
     struct SubTopicA {
         a: u32,
         b: u64,
@@ -170,7 +215,7 @@ async fn event_bus_subtopics() -> anyhow::Result<()> {
     }
 
     impl Topic for SubTopicB {
-        type MessageType = f64;
+        type MessageType = &'static str;
     }
 
     // These are two different topics
@@ -185,23 +230,27 @@ async fn event_bus_subtopics() -> anyhow::Result<()> {
     let producer_a = addr.producer(topic_a);
     let producer_b = addr.producer(topic_b);
     let producer_c = addr.producer(topic_c);
-
     let producer_d = addr.producer(topic_d);
 
-    // We have to give a type hint somewhere here (one of two ways)
-    let mut consumer = addr.consumer(|a: &SubTopicA| a.b > 2).await?;
-    let mut consumer2 = addr.consumer::<SubTopicB, _>(|a| a.name == "Oscar").await?;
+    let mut consumer_topic_a = addr.consumer(|t: &SubTopicA| t.b < 3).await?;
+    let mut consumer_topic_b = addr.consumer(|t: &SubTopicB| t.name == "Oscar").await?;
 
     producer_a.send(1).await?;
     producer_b.send(2).await?;
     producer_c.send(3).await?;
-    producer_d.send(99.0).await?;
+    producer_d.send("hello").await?;
 
-    let res = consumer.recv().await.unwrap();
-    assert_eq!(*res.as_ref(), 3);
+    // Consumer for topic a can get first two values from SubtopicA, an then no more values available
+    let res = consumer_topic_a.recv().await.unwrap();
+    assert_eq!(*res.as_ref(), 1);
+    let res = consumer_topic_a.recv().await.unwrap();
+    assert_eq!(*res.as_ref(), 2);
+    assert!(consumer_topic_a.try_recv().is_err());
 
-    let res = consumer2.recv().await.unwrap();
-    assert_eq!(*res.as_ref(), 99.0);
+    // Consumer for topic b can get the value from SubtopicB
+    let res = consumer_topic_b.recv().await.unwrap();
+    assert_eq!(*res.as_ref(), "hello");
+    assert!(consumer_topic_b.try_recv().is_err());
 
     Ok(())
 }

@@ -217,7 +217,7 @@ pub enum EventMessage {
     Subscribe {
         topic_id: TopicId,
         sender: oneshot::Sender<mpsc::Receiver<Event>>,
-        filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
+        filter: OptionalBoxedFilter,
     },
 }
 
@@ -238,16 +238,15 @@ impl Debug for EventMessage {
     }
 }
 
+type OptionalBoxedFilter = Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>;
+
 struct EventSender {
     sender: mpsc::Sender<Event>,
-    filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
+    filter: OptionalBoxedFilter,
 }
 
 impl EventSender {
-    fn new(
-        sender: mpsc::Sender<Event>,
-        filter: Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>,
-    ) -> Self {
+    fn new(sender: mpsc::Sender<Event>, filter: OptionalBoxedFilter) -> Self {
         Self { sender, filter }
     }
 }
@@ -325,11 +324,8 @@ impl Actor for EventBus {
                 sender,
                 filter,
             } => {
-                println!("Subscribing to topic: {:?}", topic_id);
-                let topic_listerners = state.listeners.entry(topic_id).or_insert(vec![]);
-
+                let topic_listerners = state.listeners.entry(topic_id).or_default();
                 let (send, receiver) = mpsc::channel(self.channel_capacity);
-
                 topic_listerners.push(EventSender::new(send, filter));
 
                 if let Err(e) = sender.send(receiver) {
@@ -366,12 +362,20 @@ pub struct Consumer<T: Topic> {
 impl<T: Topic> Consumer<T> {
     /// Receive a message from the topic.
     pub async fn recv(&mut self) -> Option<RecoveredEvent<T>> {
-        let value = self.receiver.recv().await.map(|e| RecoveredEvent {
+        self.receiver.recv().await.map(|e| RecoveredEvent {
             payload: e.payload,
             phantom: PhantomData,
-        });
+        })
+    }
 
-        value
+    /// Receive a message from the topic.
+    pub fn try_recv(
+        &mut self,
+    ) -> Result<RecoveredEvent<T>, tokio::sync::mpsc::error::TryRecvError> {
+        self.receiver.try_recv().map(|e| RecoveredEvent {
+            payload: e.payload,
+            phantom: PhantomData,
+        })
     }
 
     /// Convert the consumer to a [Stream].
@@ -420,7 +424,7 @@ impl EventBusAddr {
         // Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>
 
         let f = move |item: &Arc<dyn TopicAny>| {
-            let ptr = <Arc<dyn TopicAny> as Clone>::clone(&item).to_any();
+            let ptr = <Arc<dyn TopicAny> as Clone>::clone(item).to_any();
 
             // Downcast
             let value = match ptr.downcast_ref::<T>() {
@@ -452,10 +456,6 @@ impl EventBusAddr {
     where
         T: Topic,
     {
-        // let a = Arc::new(topic);
-        // let b = a as Arc<dyn TopicAny>;
-
-        println!("Producer for topic: {:?}", T::id());
         Producer {
             addr: self.0.clone(),
             topic: Arc::new(topic),
@@ -482,5 +482,13 @@ impl<T: Topic> Producer<T> {
         self.addr.send(EventMessage::Event(message)).await?;
 
         Ok(())
+    }
+}
+
+pub struct Filter;
+
+impl Filter {
+    pub fn all_subtopics<T: Topic>(_: &T) -> bool {
+        true
     }
 }
