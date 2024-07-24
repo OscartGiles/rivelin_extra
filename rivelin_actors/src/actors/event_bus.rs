@@ -186,7 +186,6 @@
 use std::{
     any::{Any, TypeId},
     collections::HashMap,
-    hash::{DefaultHasher, Hash, Hasher},
     marker::PhantomData,
     sync::Arc,
 };
@@ -209,22 +208,14 @@ pub trait Topic: TopicAny {
 /// A trait for converting a type to a [TopicId] and casing to Any.
 pub trait TopicAny: Any + Send + Sync {
     fn topic_id(&self) -> TopicId {
-        let mut state = DefaultHasher::new();
-        let type_id = TypeId::of::<Self>();
-        type_id.hash(&mut state);
-        let topic_hash = state.finish();
-        TopicId { hash: topic_hash }
+        TopicId(TypeId::of::<Self>())
     }
 
     fn id() -> TopicId
     where
         Self: Sized,
     {
-        let mut state = DefaultHasher::new();
-        let type_id = TypeId::of::<Self>();
-        type_id.hash(&mut state);
-        let topic_hash = state.finish();
-        TopicId { hash: topic_hash }
+        TopicId(TypeId::of::<Self>())
     }
 
     fn to_any(self: Arc<Self>) -> Arc<dyn Any + Send>;
@@ -244,9 +235,7 @@ impl<T: Any + Send + Sync> TopicAny for T {
 
 /// UniqueID for a topic type.
 #[derive(Hash, Debug, PartialEq, Eq, Clone)]
-pub struct TopicId {
-    hash: u64,
-}
+pub struct TopicId(TypeId);
 
 #[derive(Clone, Debug)]
 pub struct Event {
