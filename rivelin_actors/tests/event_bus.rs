@@ -1,4 +1,3 @@
-use std::hash::Hash;
 use std::time::Duration;
 
 use futures_util::StreamExt;
@@ -10,7 +9,6 @@ async fn event_bus_string() -> anyhow::Result<()> {
     let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
     let addr = EventBusAddr(addr);
 
-    #[derive(Hash)]
     struct HelloTopic;
 
     impl Topic for HelloTopic {
@@ -39,7 +37,6 @@ async fn event_bus_consumer_stream() -> anyhow::Result<()> {
     let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
     let addr = EventBusAddr(addr);
 
-    #[derive(Hash)]
     struct HelloTopic;
 
     impl Topic for HelloTopic {
@@ -83,7 +80,6 @@ async fn event_bus_struct() -> anyhow::Result<()> {
         age: u8,
     }
 
-    #[derive(Hash)]
     struct ComplexTopic;
 
     impl Topic for ComplexTopic {
@@ -161,7 +157,7 @@ async fn event_bus_subtopics() -> anyhow::Result<()> {
     let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
     let addr = EventBusAddr(addr);
 
-    #[derive(Hash, Clone, Copy)]
+    #[allow(dead_code)]
     struct SubTopic {
         a: u32,
         b: u64,
@@ -204,7 +200,7 @@ async fn event_bus_multiple_subtopics() -> anyhow::Result<()> {
     let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
     let addr = EventBusAddr(addr);
 
-    #[derive(Hash, Clone, Copy)]
+    #[allow(dead_code)]
     struct SubTopicA {
         a: u32,
         b: u64,
@@ -214,7 +210,6 @@ async fn event_bus_multiple_subtopics() -> anyhow::Result<()> {
         type MessageType = u32;
     }
 
-    #[derive(Hash, Clone)]
     struct SubTopicB {
         name: String,
     }
