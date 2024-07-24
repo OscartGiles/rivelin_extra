@@ -67,13 +67,14 @@ where
         async {}
     }
 
-    /// Runs when the actor is gracefully stopped.
+    /// Runs when the actor attempts gracefully shutdown.
     fn on_stop(self, _state: &mut Self::State) -> impl std::future::Future<Output = ()> + Send {
         async {}
     }
 
-    /// Runs the actor. The default implementation simple iterates over a stream of messages and calls [`Actor::handle`] for each message.
-    /// Override this method if you need to handle messages in a different way.
+    /// The [Actor]'s event loop.
+    /// The default implementation simple iterates over a stream of messages and calls [`Actor::handle`] for each message.
+    /// Override this method if the actor needs to handle events other than messages.
     fn run(
         self,
         mut message_stream: impl Stream<Item = Self::Message> + Send + 'static + std::marker::Unpin,
@@ -108,7 +109,9 @@ where
         state: &mut Self::State,
     ) -> impl std::future::Future<Output = ()> + Send;
 
-    /// Create an Actor instance.
+    /// Spawn an [Actor] with an initial state.
+    /// The [Actor] will be moved into a tokio task and started.
+    /// Returns a tuple containing an [Addr] to send messages to the actor and an [ActorHandle] to gracefully shutdown the actor.
     fn spawn<K>(actor: Self, state: Self::State) -> (K, ActorHandle)
     where
         K: From<Addr<Self>>,
@@ -138,15 +141,21 @@ where
     }
 }
 
+/// A handle to an actor that can be used to gracefully shutdown the actor or abort it.
 pub struct ActorHandle {
     task_handle: tokio::task::JoinHandle<()>,
     cancellation_token: CancellationToken,
 }
 
 impl ActorHandle {
+    /// Abort the actor.
+    /// Internally this calls [`tokio::task::JoinHandle::abort`].
     pub fn abort(&self) {
         self.task_handle.abort();
     }
+
+    /// Gracefully shutdown the actor.
+    /// This cancel's the actor's cancellation token which should call [`Actor::on_stop`] and wait for the actor to finish processing messages.
     pub async fn graceful_shutdown(self) -> Result<(), tokio::task::JoinError> {
         self.cancellation_token.cancel();
         self.task_handle.await

@@ -1,4 +1,5 @@
 use std::hash::Hash;
+use std::time::Duration;
 
 use futures_util::StreamExt;
 use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Filter, Topic};
@@ -21,7 +22,10 @@ async fn event_bus_string() -> anyhow::Result<()> {
         .await?;
 
     let producer = addr.producer(HelloTopic);
-    producer.send("Hello from topic a".to_string()).await?;
+    producer
+        .send("Hello from topic a".to_string())
+        .await
+        .unwrap();
 
     let res = consumer.recv().await.unwrap();
     let value = res.as_ref();
@@ -188,8 +192,9 @@ async fn event_bus_subtopics() -> anyhow::Result<()> {
     // Should only receive the last value, even though sent last
     assert_eq!(*res.as_ref(), 3);
 
-    // No more values should be available
-    assert!(consumer.try_recv().is_err());
+    // No more values should be available. If we haven't received on in 500ms will assume there are no more values
+    let res = tokio::time::timeout(Duration::from_millis(500), consumer.recv()).await;
+    assert!(res.is_err());
 
     Ok(())
 }
@@ -245,12 +250,17 @@ async fn event_bus_multiple_subtopics() -> anyhow::Result<()> {
     assert_eq!(*res.as_ref(), 1);
     let res = consumer_topic_a.recv().await.unwrap();
     assert_eq!(*res.as_ref(), 2);
-    assert!(consumer_topic_a.try_recv().is_err());
+
+    // No more values should be available. If we haven't received on in 500ms will assume there are no more values
+    let res = tokio::time::timeout(Duration::from_millis(500), consumer_topic_a.recv()).await;
+    assert!(res.is_err());
 
     // Consumer for topic b can get the value from SubtopicB
     let res = consumer_topic_b.recv().await.unwrap();
     assert_eq!(*res.as_ref(), "hello");
-    assert!(consumer_topic_b.try_recv().is_err());
+
+    let res = tokio::time::timeout(Duration::from_millis(500), consumer_topic_b.recv()).await;
+    assert!(res.is_err());
 
     Ok(())
 }

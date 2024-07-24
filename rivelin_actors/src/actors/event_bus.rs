@@ -4,12 +4,11 @@
 //!
 //! The [Topic] trait can be implemented to define a topic.
 //!
-//! ```
+//! ```rust
 //! # use tokio_test;
-//! use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic};
+//! use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
 //! use rivelin_actors::Actor;
 //!
-//! #[derive(Hash)]
 //! struct HelloTopic;
 //!
 //! impl Topic for HelloTopic {
@@ -22,99 +21,39 @@
 //! let addr = EventBusAddr(addr);
 //!
 //! // Subscribe to the topic
-//! let mut consumer = addr.consumer(HelloTopic).await.unwrap();
+//! let mut consumer = addr
+//!     .consumer::<HelloTopic, _>(Filter::all_subtopics)
+//!     .await
+//!     .unwrap();
 //!
 //! // Create a producer for the topic and send a message
 //! let producer = addr.producer(HelloTopic);
-//! producer.send("Hello from topic a".to_string()).await.unwrap();
+//! producer
+//!     .send("Hello from topic a".to_string())
+//!     .await
+//!     .unwrap();
 //!
 //! // Receive a message from the topic
 //! let res = consumer.recv().await.unwrap();
 //! let value = res.as_ref();
 //!
-//! assert_eq!(value, "Hello from topic a");
-//!
+//! assert_eq!(value, &"Hello from topic a".to_string());
 //! // Stop the actor
-//! handle.abort();
+//! handle.graceful_shutdown().await.unwrap();
 //!
 //! # })
 //! ```
-//! ## [Topic] fields
 //!
-//! Structs that implement [Topic] can have fields which define unique topics.
-//!
-//! ```
-//! # use tokio_test;
-//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic};
-//! # use rivelin_actors::Actor;
-//! #[derive(Hash, Copy, Clone)]
-//! struct TopicWithValues {
-//!    a: u32,
-//!    b: u64,
-//! };
-//!
-//! impl Topic for TopicWithValues {
-//!     type MessageType = String;
-//! }
-//! # tokio_test::block_on(async {
-//! # let (addr, handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
-//! # let addr = EventBusAddr(addr);
-//!
-//! // These are two different topics
-//! let topic_a = TopicWithValues { a: 1, b: 1 };
-//! let topic_b = TopicWithValues { a: 1, b: 2 };
-//!
-//! let mut consumer_a = addr.consumer(topic_a).await.unwrap();
-//! let mut consumer_b = addr.consumer(topic_b).await.unwrap();
-//! # });
-//! ```
-//!
-//! ## [Stream] [Consumer]
-//!
-//! [Consumer] can be converted to a [Stream] to receive messages.
-//! ```
-//! # use tokio_test;
-//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic};
-//! # use rivelin_actors::Actor;
-//! use futures_util::StreamExt;
-//!
-//! # tokio_test::block_on(async {
-//! # let (addr, handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
-//! # let addr = EventBusAddr(addr);
-//! # #[derive(Hash)]
-//! # struct HelloTopic;
-//! # impl Topic for HelloTopic {
-//! #     type MessageType = String;
-//! # }
-//! let expected_values = vec!["First Message", "Second Message"];
-//!
-//! // Create a consumer and convert it to a stream
-//! let mut consumer = addr.consumer(HelloTopic).await.unwrap().to_stream().enumerate();
-//! # let producer = addr.producer(HelloTopic);
-//! # producer.send("First Message".to_string()).await.unwrap();
-//! # producer.send("Second Message".to_string()).await.unwrap();
-//!
-//! let mut recovered_values = vec![];
-//! while let Some((i, Ok(value))) = consumer.next().await {
-//!     recovered_values.push(value.as_ref().to_owned());
-//!     if i == expected_values.len() - 1 {
-//!         break;
-//!     }
-//! }
-//!
-//! assert_eq!(recovered_values, expected_values);
-//! # });
-//! ```
 //! ## Compile time safety
 //!
 //! Implementations of the [Topic] trait must provide an [Topic::MessageType] associated type. This is the type of message that can be sent and received for the topic.
 //! This allows for a type safe API.
+//! However, [EventBus] supports multiple topics with different message types. This is achieves using the [Any] trait internally.
 //!
 //! ```
 //! # use tokio_test;
-//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic};
+//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
 //! # use rivelin_actors::Actor;
-//! #[derive(Hash)]
 //! struct TopicA;
 //!
 //! impl Topic for TopicA {
@@ -125,7 +64,7 @@
 //! # let addr = EventBusAddr(addr);
 //!
 //! let producer = addr.producer(TopicA);
-//! let mut consumer = addr.consumer(TopicA).await.unwrap();
+//! let mut consumer = addr.consumer::<TopicA, _>(Filter::all_subtopics).await.unwrap();
 //!
 //! // This is Ok
 //! producer.send(42).await.unwrap();
@@ -138,6 +77,109 @@
 //! //|          |
 //! //|          arguments to this method are incorrect
 //! //|
+//! # });
+//! ```
+//!
+//! ## Subtopics
+//!
+//! Structs that implement [Topic] can have fields. The value of these fields define "subtopics".
+//!
+//! Subtopics allow for more fine grained control over which messages a [Consumer] receives. A consumer could receive
+//! all messages for a topic, or filter messages by subtopic.
+//! When creating a consumer, a function or closure is passed which defines the rule for filtering subtopics.
+//!
+//! This is similar to the concept of a [`routing_keys`](https://www.rabbitmq.com/tutorials/tutorial-five-python#topic-exchange) in RabbitMQ,
+//! except rather than using a string to filter the consumers messages, we use create arbitrary filtering rules passed as closures.
+//! This provides both type safety and flexibility.
+//!
+//! ```rust
+//! # use tokio_test;
+//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
+//! # use rivelin_actors::Actor;
+//! struct SubTopics {
+//!    a: u32,
+//!    b: u32,
+//! };
+//!
+//! impl Topic for SubTopics {
+//!     type MessageType = &'static str;
+//! }
+//!
+//! # tokio_test::block_on(async {
+//! let (addr, handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
+//! let addr = EventBusAddr(addr);
+//!
+//! // These are two different topics
+//! let topic_a = SubTopics { a: 1, b: 1 };
+//! let topic_b = SubTopics { a: 1, b: 2 };
+//!
+//! let producer_1 = addr.producer(topic_a);
+//! let producer_2 = addr.producer(topic_b);
+//!
+//! // consumer_a will receive all messages
+//! let mut consumer_a = addr
+//!     .consumer::<SubTopics, _>(Filter::all_subtopics)
+//!     .await
+//!     .unwrap();
+//!
+//! // consumer_b will receive all messages where the topic.b == 2
+//! let mut consumer_b = addr.consumer(|t: &SubTopics| t.b == 2).await.unwrap();
+//!
+//! producer_1.send("This is subtopic_a").await.unwrap();
+//! producer_2.send("This is subtopic_b").await.unwrap();
+//!
+//! assert_eq!(
+//!     *consumer_a.recv().await.unwrap().as_ref(),
+//!     "This is subtopic_a"
+//! );
+//! assert_eq!(
+//!     *consumer_a.recv().await.unwrap().as_ref(),
+//!     "This is subtopic_b"
+//! );
+//!
+//! assert_eq!(
+//!     *consumer_b.recv().await.unwrap().as_ref(),
+//!     "This is subtopic_b"
+//! );
+//!
+//! handle.graceful_shutdown().await.unwrap();
+//! # })
+//! ```
+//!
+//! ## [Stream] [Consumer]
+//!
+//! [Consumer] can be converted to a [Stream] to receive messages.
+//! ```
+//! # use tokio_test;
+//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
+//! # use rivelin_actors::Actor;
+//! use futures_util::StreamExt;
+//!
+//! # tokio_test::block_on(async {
+//! # let (addr, handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
+//! # let addr = EventBusAddr(addr);
+//!
+//! # struct HelloTopic;
+//! # impl Topic for HelloTopic {
+//! #     type MessageType = String;
+//! # }
+//! let expected_values = vec!["First Message", "Second Message"];
+//!
+//! // Create a consumer and convert it to a stream
+//! let mut consumer = addr.consumer::<HelloTopic, _>(Filter::all_subtopics).await.unwrap().to_stream().enumerate();
+//! # let producer = addr.producer(HelloTopic);
+//! # producer.send("First Message".to_string()).await.unwrap();
+//! # producer.send("Second Message".to_string()).await.unwrap();
+//!
+//! let mut recovered_values = vec![];
+//! while let Some((i, value)) = consumer.next().await {
+//!     recovered_values.push(value.as_ref().to_owned());
+//!     if i == expected_values.len() - 1 {
+//!         break;
+//!     }
+//! }
+//!
+//! assert_eq!(recovered_values, expected_values);
 //! # });
 //! ```
 
@@ -421,7 +463,6 @@ impl EventBusAddr {
         let (tx, rx) = oneshot::channel();
 
         let topic_id = T::id();
-        // Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>
 
         let f = move |item: &Arc<dyn TopicAny>| {
             let ptr = <Arc<dyn TopicAny> as Clone>::clone(item).to_any();
