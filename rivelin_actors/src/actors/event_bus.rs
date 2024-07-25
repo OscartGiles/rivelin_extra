@@ -200,53 +200,21 @@ use tokio::sync::{
 use tokio_stream::wrappers::ReceiverStream;
 
 /// A [Topic] is a type which defines a topic that [Producer]s can send messages to and [Consumer]s can receive messages from.
-pub trait Topic: TopicAny {
+pub trait Topic: 'static + Send + Sync {
     /// The type of message that can be sent and received for the topic.
     type MessageType: Send + Sync;
 }
 
-/// A trait for converting a type to a [TopicId] and casing to Any.
-pub trait TopicAny: Any + Send + Sync {
-    fn topic_id(&self) -> TopicId {
-        TopicId(TypeId::of::<Self>())
-    }
-
-    fn id() -> TopicId
-    where
-        Self: Sized,
-    {
-        TopicId(TypeId::of::<Self>())
-    }
-
-    fn to_any(self: Arc<Self>) -> Arc<dyn Any + Send>;
-}
-
-impl Debug for dyn TopicAny {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "TopicAny")
-    }
-}
-
-impl<T: Any + Send + Sync> TopicAny for T {
-    fn to_any(self: Arc<Self>) -> Arc<dyn Any + Send> {
-        self
-    }
-}
-
-/// UniqueID for a topic type.
-#[derive(Hash, Debug, PartialEq, Eq, Clone)]
-pub struct TopicId(TypeId);
-
 #[derive(Clone, Debug)]
 pub struct Event {
     payload: Arc<dyn Any + Send + Sync>,
-    topic: Arc<dyn TopicAny>,
+    topic: Arc<dyn Any + Send + Sync>,
 }
 
 pub enum EventMessage {
     Event(Event),
     Subscribe {
-        topic_id: TopicId,
+        topic_id: TypeId,
         sender: oneshot::Sender<mpsc::Receiver<Event>>,
         filter: OptionalBoxedFilter,
     },
@@ -269,7 +237,7 @@ impl Debug for EventMessage {
     }
 }
 
-type OptionalBoxedFilter = Option<Box<dyn Fn(&Arc<dyn TopicAny>) -> bool + Send + Sync>>;
+type OptionalBoxedFilter = Option<Box<dyn Fn(&Arc<dyn Any + Send + Sync>) -> bool + Send + Sync>>;
 
 struct EventSender {
     sender: mpsc::Sender<Event>,
@@ -283,7 +251,7 @@ impl EventSender {
 }
 
 pub struct EventSinkState {
-    listeners: HashMap<TopicId, Vec<EventSender>>,
+    listeners: HashMap<TypeId, Vec<EventSender>>,
 }
 
 impl EventSinkState {
@@ -295,10 +263,10 @@ impl EventSinkState {
 
     fn get_topic_listeners(
         &self,
-        topic_any: Arc<dyn TopicAny>,
+        topic_any: Arc<dyn Any + Send + Sync>,
     ) -> impl Iterator<Item = &EventSender> {
         // Get the topic id of dyn TopicAny, not Arc<dyn TopicAny>. So dereference before calling.
-        let id = (*topic_any).topic_id();
+        let id = (*topic_any).type_id();
         let topic_listeners = self.listeners.get(&id).unwrap();
 
         topic_listeners.iter().filter(move |s| {
@@ -451,13 +419,11 @@ impl EventBusAddr {
     {
         let (tx, rx) = oneshot::channel();
 
-        let topic_id = T::id();
+        let topic_id = TypeId::of::<T>();
 
-        let f = move |item: &Arc<dyn TopicAny>| {
-            let ptr = <Arc<dyn TopicAny> as Clone>::clone(item).to_any();
-
+        let f = move |item: &Arc<dyn Any + Send + Sync>| {
             // Downcast
-            let value = match ptr.downcast_ref::<T>() {
+            let value = match item.downcast_ref::<T>() {
                 Some(value) => value,
                 None => panic!(
                     "Could not downcast. This should never happen and is a bug. Please report it."
