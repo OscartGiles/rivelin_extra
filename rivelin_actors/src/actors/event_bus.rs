@@ -146,6 +146,47 @@
 //! # })
 //! ```
 //!
+//! ## Enum Subtopics
+//!
+//! You can also use enums to define subtopics. In this example there is a single type called `EnumSubTopic` which defines
+//! subtopics as enum variants and associated data. Remember that while enum variants and data define subtopics, only the type
+//! (in this case `EnumSubTopic`) defines the topic.
+//!
+//! ```rust
+//! # use tokio_test;
+//! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
+//! # use rivelin_actors::Actor;
+//! # #[allow(dead_code)]
+//! enum EnumSubTopic {
+//!     A,
+//!     B { a: &'static str },
+//! }
+//!
+//! impl Topic for EnumSubTopic {
+//!     type MessageType = u32;
+//! }
+//! # tokio_test::block_on(async {
+//! # let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
+//! # let addr = EventBusAddr(addr);
+//!
+//! let producer_a = addr.producer(EnumSubTopic::B {
+//!     a: "subtopic of subtopic B",
+//! });
+//!
+//! let mut consumer_topic_b = addr
+//!     .consumer(
+//!         |t: &EnumSubTopic| matches!(t, EnumSubTopic::B { a } if a == &"subtopic of subtopic B"),
+//!     )
+//!     .await.unwrap();
+//!
+//! # let mut _consumer_topic_a = addr.consumer(|t| matches!(t, EnumSubTopic::A)).await.unwrap();
+//! producer_a.send(3).await.unwrap();
+//! let event = consumer_topic_b.recv().await.unwrap();
+//!
+//! assert_eq!(*event.as_ref(), 3);
+//! # });
+//!
+//! ```
 //! ## [Stream] [Consumer]
 //!
 //! [Consumer] can be converted to a [Stream] to receive messages.
@@ -153,12 +194,10 @@
 //! # use tokio_test;
 //! # use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Topic, Filter};
 //! # use rivelin_actors::Actor;
-//! use futures_util::StreamExt;
-//!
+//! # use futures_util::StreamExt;
 //! # tokio_test::block_on(async {
 //! # let (addr, handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
 //! # let addr = EventBusAddr(addr);
-//!
 //! # struct HelloTopic;
 //! # impl Topic for HelloTopic {
 //! #     type MessageType = String;
@@ -166,7 +205,10 @@
 //! let expected_values = vec!["First Message", "Second Message"];
 //!
 //! // Create a consumer and convert it to a stream
-//! let mut consumer = addr.consumer::<HelloTopic, _>(Filter::all_subtopics).await.unwrap().to_stream().enumerate();
+//! let mut consumer = addr.consumer::<HelloTopic, _>(Filter::all_subtopics).await
+//!     .unwrap()
+//!     .to_stream()
+//!     .enumerate();
 //! # let producer = addr.producer(HelloTopic);
 //! # producer.send("First Message".to_string()).await.unwrap();
 //! # producer.send("Second Message".to_string()).await.unwrap();
@@ -264,17 +306,18 @@ impl EventSinkState {
     fn get_topic_listeners(
         &self,
         topic_any: Arc<dyn Any + Send + Sync>,
-    ) -> impl Iterator<Item = &EventSender> {
+    ) -> Option<impl Iterator<Item = &EventSender>> {
         // Get the topic id of dyn TopicAny, not Arc<dyn TopicAny>. So dereference before calling.
         let id = (*topic_any).type_id();
-        let topic_listeners = self.listeners.get(&id).unwrap();
 
-        topic_listeners.iter().filter(move |s| {
-            if let Some(filter) = &s.filter {
-                (filter)(&topic_any)
-            } else {
-                true
-            }
+        self.listeners.get(&id).map(|topic_listeners| {
+            topic_listeners.iter().filter(move |s| {
+                if let Some(filter) = &s.filter {
+                    (filter)(&topic_any)
+                } else {
+                    true
+                }
+            })
         })
     }
 }
@@ -314,8 +357,10 @@ impl Actor for EventBus {
             EventMessage::Event(event) => {
                 let listeners = state.get_topic_listeners(event.topic.clone());
 
-                for l in listeners.into_iter() {
-                    l.sender.send(event.clone()).await.unwrap();
+                if let Some(listeners) = listeners {
+                    for l in listeners.into_iter() {
+                        l.sender.send(event.clone()).await.unwrap();
+                    }
                 }
             }
             EventMessage::Subscribe {
@@ -418,7 +463,6 @@ impl EventBusAddr {
         F: Fn(&T) -> bool + Send + Sync + 'static,
     {
         let (tx, rx) = oneshot::channel();
-
         let topic_id = TypeId::of::<T>();
 
         let f = move |item: &Arc<dyn Any + Send + Sync>| {

@@ -259,3 +259,37 @@ async fn event_bus_multiple_subtopics() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn event_bus_enum_topic() -> anyhow::Result<()> {
+    let (addr, _handle) = Actor::spawn(EventBus::new(100), EventSinkState::new());
+    let addr = EventBusAddr(addr);
+
+    #[allow(dead_code)]
+    enum EnumSubTopic {
+        A,
+        B { a: &'static str },
+    }
+
+    impl Topic for EnumSubTopic {
+        type MessageType = u32;
+    }
+
+    let producer_a = addr.producer(EnumSubTopic::B {
+        a: "subtopic of subtopic B",
+    });
+
+    let mut consumer_topic_b = addr
+        .consumer(
+            |t: &EnumSubTopic| matches!(t, EnumSubTopic::B { a } if a == &"subtopic of subtopic B"),
+        )
+        .await?;
+
+    let mut _consumer_topic_a = addr.consumer(|t| matches!(t, EnumSubTopic::A)).await?;
+
+    producer_a.send(3).await?;
+    let event = consumer_topic_b.recv().await.unwrap();
+
+    assert_eq!(*event.as_ref(), 3);
+    Ok(())
+}
