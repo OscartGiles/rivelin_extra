@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use futures_util::StreamExt;
-use rivelin_actors::event_bus::{EventBus, EventBusAddr, EventSinkState, Filter, Topic};
+use rivelin_actors::event_bus::{Consumer, EventBus, EventBusAddr, EventSinkState, Filter, Topic};
 use rivelin_actors::Actor;
 
 #[tokio::test]
@@ -15,9 +15,7 @@ async fn event_bus_string() -> anyhow::Result<()> {
         type MessageType = String;
     }
 
-    let mut consumer = addr
-        .consumer::<HelloTopic, _>(Filter::all_subtopics)
-        .await?;
+    let mut consumer: Consumer<HelloTopic> = addr.consumer(Filter::all_subtopics).await?;
 
     let producer = addr.producer(HelloTopic);
     producer
